@@ -1,124 +1,86 @@
-import json
-import os
-from pathlib import Path
-from datasets import load_dataset
+# 1. 进入 LLaMA-Factory 的 data 目录
+cd /path/to/LLaMA-Factory/data  # 替换为你的实际路径
 
-def convert_audio_flan():
-    """
-    将 Audio-FLAN 数据集转换为 LLaMA-Factory 的 ShareGPT 格式
-    """
-    
-    # 数据集路径
-    dataset_path = "./data/audio_flan_raw"
-    output_file = "./data/audio_flan_llama.json"
-    
-    print("正在加载 Audio-FLAN 数据集...")
-    
-    # 加载数据集（根据实际下载的文件格式调整）
-    try:
-        # 尝试加载 parquet 格式
-        dataset = load_dataset("parquet", data_dir=dataset_path, split="train")
-    except:
-        try:
-            # 尝试加载 jsonl 格式
-            dataset = load_dataset("json", data_files=f"{dataset_path}/train.jsonl", split="train")
-        except:
-            # 尝试加载 json 格式
-            dataset = load_dataset("json", data_files=f"{dataset_path}/train.json", split="train")
-    
-    print(f"数据集加载完成，共 {len(dataset)} 条数据")
-    
-    converted_data = []
-    skipped_count = 0
-    
-    print("开始转换数据...")
-    
-    for i, item in enumerate(dataset):
-        try:
-            # 获取音频路径
-            # Audio-FLAN 的音频字段可能是 'audio'，结构可能是 dict 或 string
-            audio_info = item.get("audio")
-            
-            if isinstance(audio_info, dict):
-                # 如果是字典，提取 path 或 bytes
-                audio_path = audio_info.get("path")
-                if not audio_path:
-                    # 如果没有 path，可能需要保存 bytes 到文件
-                    skipped_count += 1
-                    continue
-            elif isinstance(audio_info, str):
-                audio_path = audio_info
-            else:
-                skipped_count += 1
-                continue
-            
-            # 转换为绝对路径
-            if not os.path.isabs(audio_path):
-                audio_path = os.path.abspath(os.path.join(dataset_path, audio_path))
-            
-            # 检查文件是否存在
-            if not os.path.exists(audio_path):
-                print(f"警告：音频文件不存在: {audio_path}")
-                skipped_count += 1
-                continue
-            
-            # 获取指令和回复
-            # Audio-FLAN 可能的字段名
-            instruction = (item.get("instruction") or 
-                          item.get("prompt") or 
-                          item.get("question") or 
-                          item.get("input") or 
-                          "")
-            
-            response = (item.get("response") or 
-                       item.get("output") or 
-                       item.get("answer") or 
-                       "")
-            
-            if not instruction or not response:
-                skipped_count += 1
-                continue
-            
-            # 构造 LLaMA-Factory 格式
-            converted_item = {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": f"<audio>\n{instruction.strip()}"
-                    },
-                    {
-                        "role": "assistant",
-                        "content": response.strip()
-                    }
-                ],
-                "audio": audio_path
-            }
-            
-            converted_data.append(converted_item)
-            
-            # 每 1000 条打印进度
-            if (i + 1) % 1000 == 0:
-                print(f"已处理 {i + 1}/{len(dataset)} 条数据...")
-                
-        except Exception as e:
-            print(f"处理第 {i} 条数据时出错: {e}")
-            skipped_count += 1
-            continue
-    
-    # 保存转换后的数据
-    print(f"\n转换完成！")
-    print(f"成功转换: {len(converted_data)} 条")
-    print(f"跳过: {skipped_count} 条")
-    print(f"保存到: {output_file}")
-    
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(converted_data, f, ensure_ascii=False, indent=2)
-    
-    print("保存完成！")
-    
-    # 显示前 2 条数据示例
-    print("\n数据示例（前 2 条）:")
-    print(json.dumps(converted_data[:2], ensure_ascii=False, indent=2))
+# 2. 下载两个极小的测试音频 (来自开源测试集)
+wget -O test_audio_1.wav https://github.com/mozilla/TTS/raw/master/tests/data/ljspeech/wavs/LJ001-0001.wav
+wget -O test_audio_2.wav https://github.com/mozilla/TTS/raw/master/tests/data/ljspeech/wavs/LJ001-0002.wav
 
-if __name__ == "__main__":
-    convert_audio_flan()
+
+[
+  {
+    "messages": [
+      {
+        "role": "user",
+        "content": "<audio>\n请描述这段音频的内容。"
+      },
+      {
+        "role": "assistant",
+        "content": "这是一段测试音频，内容并不重要，主要是为了验证流程。"
+      }
+    ],
+    "audio": "test_audio_1.wav"
+  },
+  {
+    "messages": [
+      {
+        "role": "user",
+        "content": "<audio>\n这段声音是什么？"
+      },
+      {
+        "role": "assistant",
+        "content": "这是第二段测试音频。"
+      }
+    ],
+    "audio": "test_audio_2.wav"
+  }
+]
+
+
+  "test_audio_qwen": {
+    "file_name": "test_audio_dataset.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages",
+      "audio": "audio"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  }
+
+
+
+
+  #!/bin/bash
+
+# 只用 1 张卡验证
+export ASCEND_RT_VISIBLE_DEVICES=0
+
+# 使用 torchrun 启动，nproc_per_node=1
+torchrun --nproc_per_node=1 \
+    src/train.py \
+    --stage sft \
+    --do_train \
+    --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
+    --dataset test_audio_qwen \
+    --template qwen2_audio \
+    --finetuning_type lora \
+    --lora_target all \
+    --output_dir ./output/verify_qwen2_audio \
+    --per_device_train_batch_size 1 \
+    --gradient_accumulation_steps 1 \
+    --learning_rate 1e-4 \
+    --num_train_epochs 1 \
+    --max_length 1024 \
+    --bf16 true \
+    --gradient_checkpointing true \
+    --logging_steps 1 \
+    --save_steps 1 \
+    --overwrite_output_dir
+
+
+
+
