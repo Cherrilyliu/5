@@ -1,86 +1,88 @@
-# 1. 进入 LLaMA-Factory 的 data 目录
-cd /path/to/LLaMA-Factory/data  # 替换为你的实际路径
+import os
+import json
+from pathlib import Path
 
-# 2. 下载两个极小的测试音频 (来自开源测试集)
-wget -O test_audio_1.wav https://github.com/mozilla/TTS/raw/master/tests/data/ljspeech/wavs/LJ001-0001.wav
-wget -O test_audio_2.wav https://github.com/mozilla/TTS/raw/master/tests/data/ljspeech/wavs/LJ001-0002.wav
+def convert_aishell_to_llamafactory():
+    """
+    将 AISHELL-1 数据集转换为 LLaMA-Factory 格式
+    """
+    # AISHELL-1 数据路径
+    aishell_dir = "/data/aishell1/data_aishell"
+    wav_dir = os.path.join(aishell_dir, "wav")
+    transcript_file = os.path.join(aishell_dir, "transcript", "aishell_transcript.txt")
+    
+    # 输出文件
+    output_file = "/root/lgj/LLaMA-Factory/data/aishell_llama.json"
+    
+    # 读取转录文件
+    print("正在读取转录文件...")
+    transcripts = {}
+    with open(transcript_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                audio_id = parts[0]
+                text = ' '.join(parts[1:])
+                transcripts[audio_id] = text
+    
+    print(f"共读取 {len(transcripts)} 条转录")
+    
+    # 查找所有 wav 文件
+    print("正在查找音频文件...")
+    wav_files = []
+    for root, dirs, files in os.walk(wav_dir):
+        for file in files:
+            if file.endswith('.wav'):
+                wav_files.append(os.path.join(root, file))
+    
+    print(f"共找到 {len(wav_files)} 个音频文件")
+    
+    # 转换为 LLaMA-Factory 格式
+    print("正在转换数据...")
+    converted_data = []
+    skipped = 0
+    
+    for wav_path in wav_files:
+        # 从文件名提取 audio_id (例如: BAC009S0002W0121.wav -> BAC009S0002W0121)
+        audio_id = Path(wav_path).stem
+        
+        # 查找对应的转录
+        if audio_id not in transcripts:
+            skipped += 1
+            continue
+        
+        text = transcripts[audio_id]
+        
+        # 构造 LLaMA-Factory 格式
+        item = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"<audio>\n请转录这段音频为文字。"
+                },
+                {
+                    "role": "assistant",
+                    "content": text
+                }
+            ],
+            "audio": wav_path  # 使用绝对路径
+        }
+        
+        converted_data.append(item)
+    
+    print(f"\n转换完成！")
+    print(f"成功转换: {len(converted_data)} 条")
+    print(f"跳过: {skipped} 条")
+    
+    # 保存
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(converted_data, f, ensure_ascii=False, indent=2)
+    
+    print(f"保存到: {output_file}")
+    
+    # 显示前 2 条示例
+    print("\n数据示例（前 2 条）:")
+    print(json.dumps(converted_data[:2], ensure_ascii=False, indent=2))
 
-
-[
-  {
-    "messages": [
-      {
-        "role": "user",
-        "content": "<audio>\n请描述这段音频的内容。"
-      },
-      {
-        "role": "assistant",
-        "content": "这是一段测试音频，内容并不重要，主要是为了验证流程。"
-      }
-    ],
-    "audio": "test_audio_1.wav"
-  },
-  {
-    "messages": [
-      {
-        "role": "user",
-        "content": "<audio>\n这段声音是什么？"
-      },
-      {
-        "role": "assistant",
-        "content": "这是第二段测试音频。"
-      }
-    ],
-    "audio": "test_audio_2.wav"
-  }
-]
-
-
-  "test_audio_qwen": {
-    "file_name": "test_audio_dataset.json",
-    "formatting": "sharegpt",
-    "columns": {
-      "messages": "messages",
-      "audio": "audio"
-    },
-    "tags": {
-      "role_tag": "role",
-      "content_tag": "content",
-      "user_tag": "user",
-      "assistant_tag": "assistant"
-    }
-  }
-
-
-
-
-  #!/bin/bash
-
-# 只用 1 张卡验证
-export ASCEND_RT_VISIBLE_DEVICES=0
-
-# 使用 torchrun 启动，nproc_per_node=1
-torchrun --nproc_per_node=1 \
-    src/train.py \
-    --stage sft \
-    --do_train \
-    --model_name_or_path Qwen/Qwen2-Audio-7B-Instruct \
-    --dataset test_audio_qwen \
-    --template qwen2_audio \
-    --finetuning_type lora \
-    --lora_target all \
-    --output_dir ./output/verify_qwen2_audio \
-    --per_device_train_batch_size 1 \
-    --gradient_accumulation_steps 1 \
-    --learning_rate 1e-4 \
-    --num_train_epochs 1 \
-    --max_length 1024 \
-    --bf16 true \
-    --gradient_checkpointing true \
-    --logging_steps 1 \
-    --save_steps 1 \
-    --overwrite_output_dir
-
-
-
-
+if __name__ == "__main__":
+    convert_aishell_to_llamafactory()
