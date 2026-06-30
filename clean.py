@@ -1,189 +1,123 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-使用 qwen3-32B 模型清洗 instruction 字段
-"""
-
 import json
-import re
-from typing import Dict, List
-import time
+import os
 
-def call_qwen_api(instruction: str, api_base: str = "http://localhost:11434/api") -> str:
-    """
-    调用本地 qwen3-32B 模型
+os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0" 
 
-    Args:
-        instruction: 需要清洗的instruction
-        api_base: API地址
+import torch
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from datasets import Audio
+from jiwer import wer
+import soundfile as sf
+import librosa
 
-    Returns:
-        清洗后的instruction
-    """
-    url = f"{api_base}/chat/completions"
+# ================= 配置区 =================
+BASE_MODEL_PATH = "Qwen/Qwen2-Audio-7B-Instruct"  # HF镜像上的基座模型ID或本地路径
+LORA_WEIGHTS_PATH = "./output/qwen2_audio_aishell/checkpoint-xxx" # 你的LoRA权重绝对路径
+TEST_JSON_PATH = "/root/lgj/LLaMA-Factory/data/aishell_llama.json" # 你的ShareGPT测试集路径
+DEVICE = "npu:0" if torch.npu.is_available() else "cuda:0" if torch.cuda.is_available() else "cpu"
+MAX_NEW_TOKENS = 128
+# ==========================================
 
-    prompt = f"""你是一位专业的指令清洗专家。你的任务是将输入的instruction清洗成规范、清晰、自然的表述。
-
-请只输出清洗后的instruction，不要有任何解释、前缀或后缀。
-
-清洗规则：
-1. 修复语法错误和杂糅结构
-2. 去除重复修饰（如"怎样...的..."、"什么是...的..."等）
-3. 使表述更加简洁明了
-4. 保持原意不变
-5. 如果instruction已经很规范，则原样返回
-
-输入instruction：{instruction}
-"""
-
-    payload = {
-        "model": "qwen3-32b",
-        "messages": [
-            {"role": "system", "content": "你是一个专业的指令清洗助手，只输出清洗后的instruction。"},
-            {"role": "user", "content": prompt}
-        ],
-        "stream": False,
-        "temperature": 0.1,  # 降低随机性，确保一致性
-        "max_tokens": 1000
-    }
-
-    try:
-        import requests
-        response = requests.post(url, json=payload, timeout=120)
-        response.raise_for_status()
-        result = response.json()
-        return result["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"  调用模型失败: {e}")
-        return instruction
-
-
-def clean_dataset_with_qwen(
-    input_file: str,
-    output_file: str,
-    api_base: str = "http://localhost:11434/api",
-    batch_size: int = 10,
-    delay: float = 1.0
-):
-    """
-    使用 qwen3-32B 模型清洗整个数据集
-
-    Args:
-        input_file: 输入文件路径
-        output_file: 输出文件路径
-        api_base: Ollama API地址
-        batch_size: 批量处理大小（0表示逐个处理）
-        delay: 每次请求之间的延迟（秒）
-    """
-    print(f"正在读取文件: {input_file}")
-    with open(input_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    total_samples = len(data)
-    print(f"数据集总样本数: {total_samples}")
-
-    # 跟踪清洗进度
-    cleaned_instructions = []
-    unchanged_count = 0
-    change_count = 0
-
-    # 统计问题类型
-    issue_types = {
-        "语法杂糅_为什么要是什么": 0,
-        "重复修饰_怎样...的...": 0,
-        "重复修饰_什么是...的...": 0,
-        "重复修饰_请简要概括...具有什么": 0,
-        "格式不规范": 0,
-        "其他问题": 0
-    }
-
-    print("\n开始清洗...")
-    print("="*60)
-
-    for i, item in enumerate(data):
-        if 'instruction' in item and item['instruction']:
-            original = item['instruction']
-            cleaned = call_qwen_api(original, api_base)
-
-            # 统计问题类型
-            if original != cleaned:
-                change_count += 1
-                issue_types["其他问题"] += 1
-
-                # 判断问题类型
-                if "为什么要" in original and "是什么" in original:
-                    issue_types["语法杂糅_为什么要是什么"] += 1
-                elif "怎样" in original and "的" in original:
-                    issue_types["重复修饰_怎样...的..."] += 1
-                elif "什么是" in original and "的" in original:
-                    issue_types["重复修饰_什么是...的..."] += 1
-                elif "请简要概括" in original and "具有什么" in original:
-                    issue_types["重复修饰_请简要概括...具有什么"] += 1
-                elif not re.match(r'^[请说明解释阐述介绍概括]\s+.*$', original):
-                    issue_types["格式不规范"] += 1
-            else:
-                unchanged_count += 1
-
-            # 更新instruction
-            item['instruction'] = cleaned
-            cleaned_instructions.append((i, original, cleaned))
-
-            # 打印进度
-            if (i + 1) % 10 == 0:
-                print(f"进度: {i+1}/{total_samples} ({(i+1)/total_samples*100:.1f}%)")
-
-            # 请求延迟，避免过载
-            time.sleep(delay)
-
-    # 保存清洗后的数据
-    print("\n" + "="*60)
-    print("正在保存清洗后的数据: {output_file}")
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    # 打印统计信息
-    print("\n" + "="*60)
-    print("清洗统计:")
-    print("="*60)
-    print(f"总样本数: {total_samples}")
-    print(f"清洗后修改的样本数: {change_count}")
-    print(f"清洗后保持不变的样本数: {unchanged_count}")
-    print(f"\n问题类型分布:")
-    for issue_type, count in issue_types.items():
-        if count > 0:
-            percentage = (count / change_count) * 100 if change_count > 0 else 0
-            print(f"  {issue_type}: {count} ({percentage:.1f}%)")
-    print("="*60)
-
-    # 打印修改示例
-    print(f"\n修改示例（前{min(10, change_count)}个）:")
-    print("="*60)
-    for idx, (i, original, cleaned) in enumerate(cleaned_instructions[:10]):
-        print(f"\n[{idx+1}] 原文: {original}")
-        print(f"      修改: {cleaned}")
-    print("="*60)
-
-    print("\n✓ 清洗完成！")
-
-
-if __name__ == '__main__':
-    import argparse
-
-    parser = argparse.ArgumentParser(description='使用 qwen3-32B 模型清洗数据集')
-    parser.add_argument('--input', type=str, default=r'c:\Users\23833\Desktop\final_dataset(1).json',
-                        help='输入文件路径')
-    parser.add_argument('--output', type=str, default=r'c:\Users\23833\Desktop\final_dataset_qwen_cleaned.json',
-                        help='输出文件路径')
-    parser.add_argument('--api', type=str, default='http://localhost:11434/api',
-                        help='Ollama API地址')
-    parser.add_argument('--delay', type=float, default=1.0,
-                        help='每次请求之间的延迟（秒）')
-
-    args = parser.parse_args()
-
-    clean_dataset_with_qwen(
-        input_file=args.input,
-        output_file=args.output,
-        api_base=args.api,
-        delay=args.delay
+def load_model_and_processor(base_path, lora_path):
+    """兼容地加载基座模型 + LoRA权重"""
+    print(f"正在加载基座模型: {base_path}")
+    processor = AutoProcessor.from_pretrained(base_path, trust_remote_code=True)
+    
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        base_path, 
+        device_map=DEVICE,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16 if DEVICE != "cpu" else torch.float32
     )
+    
+    # 如果LoRA路径存在，则合并权重
+    if lora_path and os.path.exists(lora_path):
+        print(f"正在合并LoRA权重: {lora_path}")
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, lora_path)
+        model = model.merge_and_unload() # 关键：将LoRA权重合并到基座模型中
+        
+    model.eval()
+    return model, processor
+
+def extract_asr_data(json_path):
+    """从ShareGPT格式中提取音频路径和真实文本"""
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    test_items = []
+    for item in data:
+        audio_path = item.get("audio")
+        messages = item.get("messages", [])
+        
+        # 提取Assistant的真实转录文本作为Ground Truth
+        ground_truth = ""
+        for msg in messages:
+            if msg["role"] == "assistant":
+                ground_truth = msg["content"].strip()
+                break
+                
+        if audio_path and ground_truth and os.path.exists(audio_path):
+            test_items.append({"audio": audio_path, "gt": ground_truth})
+            
+    print(f"成功加载 {len(test_items)} 条有效测试数据")
+    return test_items
+
+def normalize_text(text):
+    """WER计算前的文本标准化（去除标点、转小写等）"""
+    import re
+    text = text.lower().strip()
+    text = re.sub(r'[^\w\s]', '', text) # 去除标点
+    text = re.sub(r'\s+', ' ', text).strip() # 合并多余空格
+    return text
+
+def main():
+    # 1. 加载模型
+    model, processor = load_model_and_processor(BASE_MODEL_PATH, LORA_WEIGHTS_PATH)
+    
+    # 2. 加载测试数据
+    test_data = extract_asr_data(TEST_JSON_PATH)
+    
+    predictions = []
+    references = []
+    
+    # 3. 逐条推理
+    for i, item in enumerate(test_data):
+        try:
+            # 使用soundfile/librosa安全加载音频，避免processor直接读路径可能出现的兼容性问题
+            waveform, sr = librosa.load(item["audio"], sr=16000) 
+            
+            inputs = processor(
+                text="<audio>", # Qwen2-Audio的音频触发token
+                audios=[waveform],
+                sampling_rate=16000,
+                return_tensors="pt"
+            ).to(DEVICE)
+            
+            generated_ids = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
+            pred_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            
+            # 清洗预测文本（去掉可能生成的前缀提示词）
+            if "assistant" in pred_text.lower():
+                pred_text = pred_text.split("assistant")[-1].strip()
+                
+            predictions.append(normalize_text(pred_text))
+            references.append(normalize_text(item["gt"]))
+            
+            if (i + 1) % 50 == 0:
+                print(f"进度: {i+1}/{len(test_data)} | 当前WER: {wer(references, predictions):.4f}")
+                
+        except Exception as e:
+            print(f"处理第 {i} 条数据时出错: {e}")
+            continue
+            
+    # 4. 计算最终WER
+    final_wer = wer(references, predictions)
+    print("\n" + "="*40)
+    print(f" 评估完成！")
+    print(f"📊 总测试样本数: {len(predictions)}")
+    print(f" Word Error Rate (WER): {final_wer:.4f} ({final_wer*100:.2f}%)")
+    print("="*40)
+
+if __name__ == "__main__":
+    main()
